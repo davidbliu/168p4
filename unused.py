@@ -1,4 +1,17 @@
 
+        if False and len(packets)%5==0:
+            import pickle
+            print 'saving packet'
+            s = {}
+            s['rules'] = self.rules
+            s['geos'] = self.geos
+            s['packets']=packets
+            with open('testpacket.p', 'wb') as outfile:
+                pickle.dump(s, outfile)
+                print 'saved packets to pickle'
+            with open('testpacket.p', 'rb') as pfile:
+                print len(pickle.load(pfile)['packets'])
+
 
 # check for dns packet'
 print 'is_dns'

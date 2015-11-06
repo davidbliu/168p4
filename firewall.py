@@ -20,7 +20,6 @@ ICMP_PROTOCOL = 1
 
 UDP_HEADER_LEN = 8
 DNS_HEADER_LEN = 12
-packets = []
 
 class Firewall:
     def __init__(self, config, iface_int, iface_ext):
@@ -58,24 +57,12 @@ class Firewall:
     def handle_packet(self, pkt_dir, pkt):
         # TODO: Your main firewall code will be here.
 
-        # save the packet in pickle
-        packets.append((pkt, pkt_dir))
-        if False and len(packets)%5==0:
-            import pickle
-            print 'saving packet'
-            s = {}
-            s['rules'] = self.rules
-            s['geos'] = self.geos
-            s['packets']=packets
-            with open('testpacket.p', 'wb') as outfile:
-                pickle.dump(s, outfile)
-                print 'saved packets to pickle'
-            with open('testpacket.p', 'rb') as pfile:
-                print len(pickle.load(pfile)['packets'])
-        
         # check the packet against all rules
         verdict = firewall_handle_packet(pkt_dir, pkt, self.rules, self.geos)
-        print 'verdict: '+verdict
+        verdict = verdict.lower()
+        
+        # if verdict != 'pass':
+            # print 'verdict: '+verdict+' prot: '+str(get_protocol(pkt))+' port: '+str(get_tcp_external_port(pkt_dir,pkt))
 
         if verdict == 'pass' and pkt_dir == PKT_DIR_INCOMING:
             self.iface_int.send_ip_packet(pkt)
@@ -106,7 +93,6 @@ def packet_matches_rule(pkt_dir, pkt, rule, geos):
             if not domain_match(rule.domain_name, qname):
                 return False
     else:
-        # check if protocol matches
         packet_protocol = get_protocol(pkt)
         rule_protocol = rule.get_protocol()
         if packet_protocol != rule_protocol:
@@ -135,7 +121,7 @@ def firewall_handle_packet(pkt_dir, pkt,rules, geos):
     verdict = 'pass'
     for rule in rules:
         if packet_matches_rule(pkt_dir, pkt, rule, geos):
-            print rule
+            # print rule
             verdict = rule.verdict
     return verdict
 
@@ -258,7 +244,7 @@ class Geo:
     def __init__(self, a, b, code):
         self.a = a
         self.b = b
-        self.code = code
+        self.code = code.lower()
     def a_int(self):
         return 
     def __repr__(self):
@@ -288,19 +274,40 @@ class ProtocolRule(Rule):
         if '/' in self.ext_ip:
             return int(self.ext_ip.split('/')[1])
         return 0
+    
+    def get_cc(self, geoipdb, ip):
+        first = 0
+        last = len(geoipdb)-1
+        found = False
+        while first <= last and not found:
+            mid = (first + last)//2
+            geo = geoipdb[mid]
+            ip1, = struct.unpack('!L', socket.inet_aton(geo.a)) 
+            ip2, = struct.unpack('!L', socket.inet_aton(geo.b)) 
+            if ip1 <= ip and ip2 >= ip:
+                return geo.code
+            else:
+                if ip > ip2:
+                    first = mid + 1
+                else:
+                    last = mid - 1
+        return None
 
     def matches_ip(self, ip, geoipdb):
         if self.ext_ip.lower() == 'any':
             return True
-        if len(self.ext_ip) == 2:
-            for geo in geoipdb:
-                ip1, = struct.unpack('!L', socket.inet_aton(geo.a))
-                ip2, = struct.unpack('!L', socket.inet_aton(geo.b))
-                if ip >= ip1 and ip <= ip2:
-                    if self.ext_ip.lower() == geo.code.lower():
-                        return True
-                    else:
-                        return False
+        # is a country code
+        if not self.ext_ip.isdigit() and len(self.ext_ip) == 2:
+            cc = self.get_cc(geoipdb, ip)
+            if cc == None:
+                return False
+            else:
+                if cc == self.ext_ip.lower():
+                    return True
+                else:
+                    return False
+
+        # is a standard ip (may have mask)
         rule_ip = self.ext_ip
         rule_ip = struct.unpack('!L', socket.inet_aton(rule_ip.split('/')[0]))[0]
         rule_ip = rule_ip >> self.get_mask()
@@ -311,8 +318,8 @@ class ProtocolRule(Rule):
         if self.ext_port.lower() == 'any':
             return True
         if '-' in self.ext_port:
-            p1 = self.ext_port.split('-')[0]
-            p2 = self.ext_port.split('-')[1]
+            p1 = int(self.ext_port.split('-')[0])
+            p2 = int(self.ext_port.split('-')[1])
             if port >= p1 and port <= p2:
                 return True
         else:
