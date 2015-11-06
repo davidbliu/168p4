@@ -60,7 +60,7 @@ class Firewall:
 
         # save the packet in pickle
         packets.append((pkt, pkt_dir))
-        if True and len(packets)%5==0:
+        if False and len(packets)%5==0:
             import pickle
             print 'saving packet'
             s = {}
@@ -102,12 +102,13 @@ def packet_matches_rule(pkt_dir, pkt, rule, geos):
         if not is_dns(pkt_dir,pkt):
             return False
         else:
-            print 'not implemented'
+            qname, qtype, qclass = dns_qname_qtype_qclass(pkt)
+            if not domain_match(rule.domain_name, qname):
+                return False
     else:
         # check if protocol matches
         packet_protocol = get_protocol(pkt)
         rule_protocol = rule.get_protocol()
-        # print 'packet: '+str(packet_protocol)+', rule: '+str(rule_protocol)
         if packet_protocol != rule_protocol:
             return False
         if packet_protocol == TCP_PROTOCOL:
@@ -131,12 +132,26 @@ def packet_matches_rule(pkt_dir, pkt, rule, geos):
     return True
 
 def firewall_handle_packet(pkt_dir, pkt,rules, geos):
-    verdict = 'drop'
+    verdict = 'pass'
     for rule in rules:
         if packet_matches_rule(pkt_dir, pkt, rule, geos):
             print rule
             verdict = rule.verdict
     return verdict
+
+def domain_match(rule_domain, pkt_domain):
+    if rule_domain[0] == '*':
+        rd = rule_domain[2:]
+        pd = pkt_domain
+        while len(pd) > 0 and pd[0] != '.':
+            pd = pd[1:]
+        pd = pd[1:]
+        if pd == rd:
+            return True
+    else:
+        if rule_domain == pkt_domain:
+            return True
+    return False
 
 """
 methods
@@ -192,42 +207,47 @@ def dns_qdcount(pkt):
     qdcount = struct.unpack('!H', qdcount)[0]
     return qdcount
 
-def dns_qtype(pkt):
-    udp_header_start = get_ip_header_length(pkt)
-    qtype = pkt[udp_header_start+UDP_HEADER_LEN+DNS_HEADER_LEN+2:udp_header_start+UDP_HEADER_LEN+DNS_HEADER_LEN+4]
-    qtype = struct.unpack('!H', qtype)[0]
-    return qtype
-
-def dns_qclass(pkt):
-    udp_header_start = get_ip_header_length(pkt)
-    qclass = pkt[udp_header_start+UDP_HEADER_LEN+DNS_HEADER_LEN+4:udp_header_start+UDP_HEADER_LEN+DNS_HEADER_LEN+6]
-    qclass = struct.unpack('!H', qclass)[0]
-    return qclass
+def dns_qname_qtype_qclass(pkt):
+    start = get_ip_header_length(pkt)+UDP_HEADER_LEN+DNS_HEADER_LEN
+    finished = False
+    numbytes = struct.unpack('!B', pkt[start:start+1])[0]
+    qname = ''
+    while not finished:
+        # print 'numbytes:'+str(numbytes)
+        while numbytes > 0:
+            numbytes -= 1
+            start = start+1
+            qname += chr(struct.unpack('!B', pkt[start:start+1])[0])
+            # print qname
+        start += 1
+        numbytes = struct.unpack('!B', pkt[start:start+1])[0]
+        if numbytes == 0:
+            finished = True
+        else:
+            qname += '.'
+    start = start + 1
+    qtype = struct.unpack('!H', pkt[start:start+2])[0]
+    qclass = struct.unpack('!H', pkt[start+2:start+4])[0]
+    return qname, qtype, qclass
 
 def is_dns(pkt_dir, pkt):
     # udp outgoing with dst port 53
     protocol = get_protocol(pkt)
     if pkt_dir != PKT_DIR_OUTGOING or protocol != UDP_PROTOCOL:
-        # print 'is_dns: wrong dir or protocol'
         return False
     dst_port = get_udp_port(pkt, dst = True)
     if dst_port != 53:
-        # print 'is_dns: wrong port'
         return False
     # exactly 1 DNS question entry
     qdcount = dns_qdcount(pkt)
     if qdcount != 1:
-        # print 'is_dns: wrong qdcount'
         return False
+    qname, qtype, qclass = dns_qname_qtype_qclass(pkt)
     # qtype == 1 or qtype == 28 
-    qtype = dns_qtype(pkt)
     if qtype != 1 and qtype != 28:
-        # print 'is_dns: wrong qtype was '+str(qtype)
         return False
     # qclass == 1
-    qclass = dns_qclass(pkt)
     if qclass != 1:
-        # print 'is_dns: wrong qclass was '+str(qclass)
         return False
     return True
 

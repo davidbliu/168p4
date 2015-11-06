@@ -20,17 +20,7 @@ geos = data['geos']
 pkt = packets[0][0]
 pkt_dir = packets[0][1]
 
-print_packet_info(pkt)
-verdict = firewall_handle_packet(pkt_dir, pkt, rules, geos)
-print verdict
+print is_dns(pkt_dir,pkt)
 
-print '........'
-
-pkt = packets[1][0]
-pkt_dir = packets[1][1]
-
-print_packet_info(pkt)
-verdict = firewall_handle_packet(pkt_dir, pkt, rules, geos)
-print verdict
-
-
+print 'testing domain match'
+print domain_match('*.oogle.com', 'www.google.com')
