@@ -63,6 +63,8 @@ class Firewall:
         
         # if verdict != 'pass':
             # print 'verdict: '+verdict+' prot: '+str(get_protocol(pkt))+' port: '+str(get_tcp_external_port(pkt_dir,pkt))
+        # if get_protocol(pkt) == UDP_PROTOCOL:
+            # print 'udp port '+str(get_protocol(pkt))+' verdict: '+verdict + ', ip: '+str(get_external_ip(pkt_dir, pkt))
 
         if verdict == 'pass' and pkt_dir == PKT_DIR_INCOMING:
             self.iface_int.send_ip_packet(pkt)
@@ -273,7 +275,7 @@ class ProtocolRule(Rule):
     def get_mask(self):
         if '/' in self.ext_ip:
             return int(self.ext_ip.split('/')[1])
-        return 0
+        return 32
     
     def get_cc(self, geoipdb, ip):
         first = 0
@@ -310,8 +312,8 @@ class ProtocolRule(Rule):
         # is a standard ip (may have mask)
         rule_ip = self.ext_ip
         rule_ip = struct.unpack('!L', socket.inet_aton(rule_ip.split('/')[0]))[0]
-        rule_ip = rule_ip >> self.get_mask()
-        ip = ip >> self.get_mask()
+        rule_ip = rule_ip >> (32-self.get_mask())
+        ip = ip >> (32-self.get_mask())
         return ip == rule_ip
 
     def matches_port(self, port):
