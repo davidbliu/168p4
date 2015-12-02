@@ -6,6 +6,7 @@ import socket
 import time
 import pickle
 from firewall import *
+from helpers import *
 
 # length of header in bytes
 
@@ -16,17 +17,30 @@ packets = data['packets']
 rules = data['rules']
 geos = data['geos']
 
-""" main stuff here """
-pkt = packets[0][0]
-pkt_dir = packets[0][1]
+for packet in packets:
+  prot = get_protocol(packet[0])
+  if prot == UDP_PROTOCOL and is_dns(packet[1],packet[0]):
+    pkt = packet[0]
+    pkt_dir = packet[1]
 
-print is_dns(pkt_dir,pkt)
+# print 'testing ip checksum'
+# print 'calculated: '+str(ip_checksum(pkt))
+# print 'actual: '+str(struct.unpack('!H', pkt[10:12])[0])
+# print 'testing tcp checksum'
+# print 'calculated: '+str(tcp_checksum(pkt))
+# start = get_ip_header_length(pkt) + 16
+# print 'actual: '+str(struct.unpack('!H', pkt[start:start+2])[0])
 
-print 'testing domain match'
-print domain_match('*.oogle.com', 'www.google.com')
+# print 'testing upd checksum'
+# print 'calculated: '+str(udp_checksum(pkt))
+# start = get_ip_header_length(pkt)+6
+# print 'actual: '+str(struct.unpack('!H', pkt[start:start+2])[0])
 
-print 'ip matching'
-ip1 = '8.8.8.8'
-ip1 = struct.unpack('!L', socket.inet_aton(ip1))[0]
-rule = ProtocolRule('pass', 'tcp', '8.8.8.4', '69')
-print rule.matches_ip(ip1, geos)
+def set_string(a,b,i1,i2):
+  resp = a[:i1] + b + a[i2:]
+  return resp
+
+def make_tcp_response(pkt):
+  'fuck this stupid ass fucking dumb project'
+  return 'assmar'
+resp = make_dns_response(pkt)

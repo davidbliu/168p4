@@ -7,12 +7,13 @@ import struct
 import socket
 import time
 
+from helpers import *
 # (http://docs.python.org/2/library/)
 # You must NOT use any 3rd-party libraries.
 
 # hard coded constants
 
-VERDICTS = ['drop', 'pass']
+VERDICTS = ['drop', 'pass', 'deny', 'log']
 
 UDP_PROTOCOL = 17
 TCP_PROTOCOL = 6
@@ -54,27 +55,63 @@ class Firewall:
                 geos.append(Geo(x[0], x[1], x[2]))
         self.geos = geos
 
+        # TODO: remove this later its for testing (David)
+        for rule in self.rules:
+            print 'rule verdict: '+rule.verdict
     def handle_packet(self, pkt_dir, pkt):
         # TODO: Your main firewall code will be here.
-
         # check the packet against all rules
+        if self.handle_p4_packet(pkt_dir, pkt):
+            return
         verdict = firewall_handle_packet(pkt_dir, pkt, self.rules, self.geos)
         verdict = verdict.lower()
-        
-        # if verdict != 'pass':
-            # print 'verdict: '+verdict+' prot: '+str(get_protocol(pkt))+' port: '+str(get_tcp_external_port(pkt_dir,pkt))
-        # if get_protocol(pkt) == UDP_PROTOCOL:
-            # print 'udp port '+str(get_protocol(pkt))+' verdict: '+verdict + ', ip: '+str(get_external_ip(pkt_dir, pkt))
-
         if verdict == 'pass' and pkt_dir == PKT_DIR_INCOMING:
             self.iface_int.send_ip_packet(pkt)
         elif verdict == 'pass' and pkt_dir == PKT_DIR_OUTGOING:
             self.iface_ext.send_ip_packet(pkt)
 
+    def handle_p4_packet(self, pkt_dir, pkt):
+        # TODO: reverse rules so first matching applies
+        rule = get_matching_p4_rule(pkt_dir, pkt, self.rules, self.geos)
+        if rule == None:
+            return False
+        # handle packet and return true
+        print 'matches a p4 rule '+rule.verdict
+        if rule.is_dns():
+            print 'its a dns rule'
+            
+        return True
+
     # TODO: You can add more methods as you want.
 
 # TODO: You may want to add more classes/functions as well.
 
+""" PROJECT 4
+"""
+def get_matching_p4_rule(pkt_dir, pkt, rules, geos):
+    for rule in rules:
+        if packet_matches_rule(pkt_dir, pkt, rule, geos) and (rule.verdict == 'deny' or rule.verdict == 'log'):
+            return rule
+    return None
+
+def getIpChecksum(pkt):
+    pktData = pkt
+    pktlen = get_ip_header_length(pkt)
+
+def getTcpChecksum(pkt):
+    pktData = pkt
+
+def handleDenyTCP(pkt):
+    # compute tcp checksum
+    rstPkt = pkt
+    # send tcp packet
+    # drop the packet
+    pass
+
+def handleDenyDNS(pkt):
+    pass
+def handleLog(pkt):
+    pass
 """
 Everything Here was added by me and is highly likely wrong
 """
@@ -94,6 +131,8 @@ def packet_matches_rule(pkt_dir, pkt, rule, geos):
             qname, qtype, qclass = dns_qname_qtype_qclass(pkt)
             if not domain_match(rule.domain_name, qname):
                 return False
+    elif rule.is_p4():
+        print 'this  is a p4 rule'
     else:
         packet_protocol = get_protocol(pkt)
         rule_protocol = rule.get_protocol()
@@ -117,6 +156,7 @@ def packet_matches_rule(pkt_dir, pkt, rule, geos):
                 port = get_udp_port(pkt, dst = True)
             if not rule.matches_ip(ip, geos) or not rule.matches_port(port):
                 return False
+
     return True
 
 def firewall_handle_packet(pkt_dir, pkt,rules, geos):
@@ -261,6 +301,8 @@ class Rule:
         if self.protocol.lower() == 'icmp':
             return ICMP_PROTOCOL
         return -1
+    def is_p4(self):
+        return self.verdict == 'deny' or self.verdict == 'log'
 
 class ProtocolRule(Rule):
     def __init__(self, verdict = '', protocol='', ext_ip = None, ext_port = None):
