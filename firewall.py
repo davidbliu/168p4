@@ -7,7 +7,7 @@ import struct
 import socket
 import time
 
-from helpers import *
+# from helpers import *
 # (http://docs.python.org/2/library/)
 # You must NOT use any 3rd-party libraries.
 
@@ -55,12 +55,12 @@ class Firewall:
                 geos.append(Geo(x[0], x[1], x[2]))
         self.geos = geos
 
-        # TODO: remove this later its for testing (David)
-        for rule in self.rules:
-            print 'rule verdict: '+rule.verdict
     def handle_packet(self, pkt_dir, pkt):
         # TODO: Your main firewall code will be here.
         # check the packet against all rules
+
+        # if the packet matches a p4, stop this function
+        # the handle_p4_packet method may also send packets + log
         if self.handle_p4_packet(pkt_dir, pkt):
             return
         verdict = firewall_handle_packet(pkt_dir, pkt, self.rules, self.geos)
@@ -72,15 +72,23 @@ class Firewall:
 
     def handle_p4_packet(self, pkt_dir, pkt):
         # TODO: reverse rules so first matching applies
-        rule = get_matching_p4_rule(pkt_dir, pkt, self.rules, self.geos)
+        rule = get_matching_p4_rule(pkt_dir, pkt, reversed(self.rules), self.geos)
         if rule == None:
             return False
-        # handle packet and return true
-        print 'matches a p4 rule '+rule.verdict
-        if rule.is_dns():
-            print 'its a dns rule'
-            
-        return True
+        if rule.is_dns() and pkt_dir == PKT_DIR_OUTGOING:
+            resp = make_dns_response(pkt)
+            self.iface_int.send_ip_packet(resp)
+            return True
+        elif rule.verdict == 'deny' and get_protocol(pkt) == TCP_PROTOCOL: 
+            resp = make_tcp_response(pkt)
+            if pkt_dir == PKT_DIR_OUTGOING:
+                self.iface_int.send_ip_packet(resp)
+            else:
+                self.iface_ext.send_ip_packet(resp)
+            return True
+        else:
+            print 'matches some OTHER RULE probably LOG'
+        return False
 
     # TODO: You can add more methods as you want.
 
@@ -94,34 +102,9 @@ def get_matching_p4_rule(pkt_dir, pkt, rules, geos):
             return rule
     return None
 
-def getIpChecksum(pkt):
-    pktData = pkt
-    pktlen = get_ip_header_length(pkt)
-
-def getTcpChecksum(pkt):
-    pktData = pkt
-
-def handleDenyTCP(pkt):
-    # compute tcp checksum
-    rstPkt = pkt
-    # send tcp packet
-    # drop the packet
-    pass
-
-def handleDenyDNS(pkt):
-    pass
-def handleLog(pkt):
-    pass
 """
 Everything Here was added by me and is highly likely wrong
 """
-
-def print_packet_info(pkt):
-    print get_protocol(pkt)
-    print get_udp_port(pkt)
-    print dns_qdcount(pkt)
-    print dns_qtype(pkt)
-    print dns_qclass(pkt)
 
 def packet_matches_rule(pkt_dir, pkt, rule, geos):
     if rule.is_dns():
@@ -131,8 +114,6 @@ def packet_matches_rule(pkt_dir, pkt, rule, geos):
             qname, qtype, qclass = dns_qname_qtype_qclass(pkt)
             if not domain_match(rule.domain_name, qname):
                 return False
-    elif rule.is_p4():
-        print 'this  is a p4 rule'
     else:
         packet_protocol = get_protocol(pkt)
         rule_protocol = rule.get_protocol()
@@ -162,7 +143,7 @@ def packet_matches_rule(pkt_dir, pkt, rule, geos):
 def firewall_handle_packet(pkt_dir, pkt,rules, geos):
     verdict = 'pass'
     for rule in rules:
-        if packet_matches_rule(pkt_dir, pkt, rule, geos):
+        if rule.verdict != 'deny' and packet_matches_rule(pkt_dir, pkt, rule, geos):
             # print rule
             verdict = rule.verdict
     return verdict
@@ -235,6 +216,27 @@ def dns_qdcount(pkt):
     qdcount = struct.unpack('!H', qdcount)[0]
     return qdcount
 
+def dns_qname(pkt):
+    i1 = get_ip_header_length(pkt)+UDP_HEADER_LEN+DNS_HEADER_LEN
+    start = i1
+    finished = False
+    numbytes = struct.unpack('!B', pkt[start:start+1])[0]
+    qname = ''
+    while not finished:
+        # print 'numbytes:'+str(numbytes)
+        while numbytes > 0:
+            numbytes -= 1
+            start = start+1
+            qname += chr(struct.unpack('!B', pkt[start:start+1])[0])
+            # print qname
+        start += 1
+        numbytes = struct.unpack('!B', pkt[start:start+1])[0]
+        if numbytes == 0:
+            finished = True
+        else:
+            qname += '.'
+    i2 = start + 1
+    return pkt[i1:i2]
 def dns_qname_qtype_qclass(pkt):
     start = get_ip_header_length(pkt)+UDP_HEADER_LEN+DNS_HEADER_LEN
     finished = False
@@ -301,12 +303,10 @@ class Rule:
         if self.protocol.lower() == 'icmp':
             return ICMP_PROTOCOL
         return -1
-    def is_p4(self):
-        return self.verdict == 'deny' or self.verdict == 'log'
 
 class ProtocolRule(Rule):
     def __init__(self, verdict = '', protocol='', ext_ip = None, ext_port = None):
-        self.verdict = verdict
+        self.verdict = verdict.lower()
         self.protocol = protocol
         self.ext_ip = ext_ip
         self.ext_port = ext_port
@@ -377,7 +377,7 @@ class ProtocolRule(Rule):
 
 class DNSRule(Rule):
     def __init__(self, verdict = '', domain_name=''):
-        self.verdict = verdict
+        self.verdict = verdict.lower()
         self.domain_name = domain_name
 
     def is_dns(self):
@@ -386,5 +386,139 @@ class DNSRule(Rule):
     def __repr__(self):
         return self.verdict
 
+# project 4 stuff
+
+
+def get_checksum(data):
+  size = len(data)
+  cksum = 0
+  pointer = 0
+  while size > 1:
+    cksum += struct.unpack('!H', data[pointer:pointer+2])[0] 
+    size -= 2
+    pointer += 2
+  if size: 
+    cksum += struct.unpack('!B', data[pointer])[0]
+  cksum = (cksum >> 16) + (cksum & 0xffff)
+  cksum += (cksum >> 16)
+  return (~cksum) & 0xFFFF
+
+def tcp_checksum(pkt):
+  ip_hdrlen = get_ip_header_length(pkt)
+  data = ''
+  data += pkt[12:20] # ip src and dest
+  data += struct.pack('!B', 0) # reserved (0)
+  data += pkt[9:10] # protocol
+  data += struct.pack('!H', len(pkt)-ip_hdrlen) # TCP Length
+  data += pkt[ip_hdrlen:ip_hdrlen+16]
+  data += struct.pack('!H', 0) # zero for tcp checkusm
+  data += pkt[ip_hdrlen+18:len(pkt)]
+  size = len(data)
+  return get_checksum(data)
+
+def ip_checksum(pkt):
+  ip_hdrlen = get_ip_header_length(pkt)
+  data = ''
+  data += pkt[:10]
+  data += pkt[12:ip_hdrlen]
+  size = get_ip_header_length(pkt)
+  return get_checksum(data)
+
+def udp_checksum(pkt):
+  ip_hdrlen = get_ip_header_length(pkt)
+  data = ''
+  data += pkt[12:20]
+  data += struct.pack('!B', 0)
+  data += pkt[9:10]
+  data += pkt[ip_hdrlen+4:ip_hdrlen+6]
+  data += pkt[ip_hdrlen:ip_hdrlen+6]
+  data += pkt[ip_hdrlen+UDP_HEADER_LEN:len(pkt)]
+  return get_checksum(data)
+
+
+def set_string(a,b,i1,i2):
+  resp = a[:i1] + b + a[i2:]
+  return resp
+
+def make_tcp_response(pkt):
+    ip_hdrlen = get_ip_header_length(pkt)
+    # create IP header
+    ip_hdr = pkt[:ip_hdrlen]
+    ip_flags = struct.unpack('!B', pkt[6])[0]
+    ip_flags = ip_flags & 0b00011111 # set ip flags to 0
+    # set ihl and version
+    ihl_str = struct.unpack('!B', ip_hdr[0])
+    ip_hdr = set_string(ip_hdr, struct.pack('!B', 0), 1, 2) # TOS = 0
+    ip_hdr = set_string(ip_hdr, struct.pack('!B', ip_flags), 6, 7) # ip flags = 0
+    ip_hdr = set_string(ip_hdr, pkt[12:16], 16, 20) # switch src dst
+    ip_hdr = set_string(ip_hdr, pkt[16:20], 12, 16) # switch src dst
+    # create TCP header
+    tcp_hdr = pkt[ip_hdrlen: ip_hdrlen + 20]
+    seqno = struct.unpack('!L', pkt[ip_hdrlen + 4: ip_hdrlen + 8])[0] # old seqno
+    ackno = seqno + 1
+    offset = struct.unpack('!B', tcp_hdr[12])[0]
+    offset = offset & 0b00001111 
+    offset = offset | 0b01010000 # set offset = 5
+    tcp_hdr = set_string(tcp_hdr, struct.pack('!L', 0), 4, 8) # seqnum = 0
+    tcp_hdr = set_string(tcp_hdr, struct.pack('!L', ackno), 8, 12) # ackno = oldseqno + 1o
+    tcp_hdr = set_string(tcp_hdr, struct.pack('!B', offset), 12, 13) # offset = 5
+    tcp_hdr = set_string(tcp_hdr, struct.pack('!H', 0), 14, 16) # window = 0
+    tcp_hdr = set_string(tcp_hdr, struct.pack('!H', 0), 18, 20) # urgent = 0
+    tcp_hdr = set_string(tcp_hdr, struct.pack('!B', 20), 13, 14) # RST flag = 4
+    tcp_hdr = set_string(tcp_hdr, pkt[ip_hdrlen:ip_hdrlen+2], 2, 4) # switch src dst
+    tcp_hdr = set_string(tcp_hdr, pkt[ip_hdrlen+2:ip_hdrlen+4], 0, 2) # switch src dst
+    tcp_hdr = set_string(tcp_hdr, struct.pack('!H', tcp_checksum(ip_hdr + tcp_hdr)), 16, 18) # checksum
+    # ip hdr length and checksum
+    ip_hdr = set_string(ip_hdr, struct.pack('!H', len(ip_hdr+tcp_hdr)), 2, 4) # total length
+    ip_hdr = set_string(ip_hdr, struct.pack('!H', ip_checksum(ip_hdr)), 10, 12) # checksum 
+    return ip_hdr + tcp_hdr
+
+def make_dns_response(pkt):
+  ip_hdrlen = get_ip_header_length(pkt)
+  # construct ip header (20bytes)
+  ip_hdr = pkt[:ip_hdrlen]
+  # switch src and dst
+  ip_hdr = set_string(ip_hdr, pkt[12:16], 16, 20)
+  ip_hdr = set_string(ip_hdr, pkt[16:20], 12, 16)
+  # construct udp header (8bytes)
+  udp_hdr = pkt[ip_hdrlen:ip_hdrlen + 8]
+  # switch src and dst port
+  udp_hdr = set_string(udp_hdr, pkt[ip_hdrlen:ip_hdrlen+2], 2, 4)
+  udp_hdr = set_string(udp_hdr, pkt[ip_hdrlen+2:ip_hdrlen+4], 0, 2)
+  # construct dns header (12bytes)
+  dns_hdr = pkt[ip_hdrlen+8:ip_hdrlen+8+12]
+  line2 = struct.unpack('!H', dns_hdr[2:4])[0]
+  line2 = line2 | 0b1000000000000000 # set QR = 1
+  line2 = line2 & 0b1000011111111111 # set opcode = 0
+  line2 = line2 & 0b1111110111111111 # set TC = 0
+  line2 = line2 & 0b1111111111110000 # set rcode = 0
+  dns_hdr = set_string(dns_hdr, struct.pack('!H', line2), 2, 4) # set second line
+  dns_hdr = set_string(dns_hdr, struct.pack('!H', 1), 6, 8) # anscount = 1
+  dns_hdr = set_string(dns_hdr, struct.pack('!H', 0), 8, 10) # nscount = 0
+  dns_hdr = set_string(dns_hdr, struct.pack('!H', 0), 10, 12) # arcount = 0
+  # construct dns data
+  dns_data = pkt[ip_hdrlen+20:]
+  # construct dns answer
+  answer = ''
+  qname, qtype, qclass = dns_qname_qtype_qclass(pkt)
+  answer += dns_qname(pkt)
+  answer += struct.pack('!H', 1) # type
+  answer += struct.pack('!H', 1) # class
+  answer += struct.pack('!L', 100) # ttl
+  answer += struct.pack('!H', 4) # length
+  answer += socket.inet_aton('169.229.49.130')
+  dns_data = dns_data + answer 
+  # loose ends
+  ## ip header length and checksum
+  ip_hdr = set_string(ip_hdr, struct.pack('!H', len(ip_hdr + udp_hdr + dns_hdr + dns_data)), 2, 4)
+  ip_hdr = set_string(ip_hdr, struct.pack('!H', ip_checksum(ip_hdr)), 10, 12)
+  ## udp length
+  udp_len = len(udp_hdr + dns_hdr + dns_data)
+  udp_hdr = set_string(udp_hdr, struct.pack('!H', udp_len) , 4, 6)
+  ## udp header checksum
+  udp_hdr = set_string(udp_hdr, struct.pack('!H', udp_checksum(ip_hdr + udp_hdr + dns_hdr + dns_data)), 6, 8)
+  return ip_hdr + udp_hdr + dns_hdr + dns_data
+
+# eo4
 if __name__=='__main__':
     print 'firewall.py'

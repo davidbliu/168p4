@@ -5,7 +5,6 @@ import socket
 import time
 import pickle
 from firewall import *
-from helpers import *
 
 
 def get_checksum(data):
@@ -56,6 +55,10 @@ def udp_checksum(pkt):
 
 def make_tcp_response(pkt):
   return pkt
+
+def set_string(a,b,i1,i2):
+  resp = a[:i1] + b + a[i2:]
+  return resp
 
 def make_dns_response(pkt):
   ip_hdrlen = get_ip_header_length(pkt)
