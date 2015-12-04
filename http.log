@@ -1,0 +1,8 @@
+www-inst.eecs.berkeley.edu GET /~cs168/fa15/ HTTP/1.1 200 273
+www-inst.eecs.berkeley.edu GET /~cs168/fa15/images/Keycard_A.png HTTP/1.1 200 324
+www.eecs.berkeley.edu GET /Includes/EECS-images/eecslogo.gif HTTP/1.1 200 828
+wd.berkeley-pbl.com GET /index.php/Officer_training HTTP/1.1 200 4457
+wd.berkeley-pbl.com GET /index.php/Officer_training HTTP/1.1 200 4457
+wd.berkeley-pbl.com GET /logo-135.png HTTP/1.1 200 27126
+wd.berkeley-pbl.com GET /resources/assets/poweredby_mediawiki_88x31.png HTTP/1.1 200 3525
+wd.berkeley-pbl.com GET /load.php?debug=false&lang=en&modules=startup&only=scripts&skin=chameleon&* HTTP/1.1 200 -1

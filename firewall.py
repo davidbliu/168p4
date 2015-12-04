@@ -6,8 +6,8 @@ from main import PKT_DIR_INCOMING, PKT_DIR_OUTGOING
 import struct
 import socket
 import time
+import re
 
-# from helpers import *
 # (http://docs.python.org/2/library/)
 # You must NOT use any 3rd-party libraries.
 
@@ -22,12 +22,18 @@ ICMP_PROTOCOL = 1
 UDP_HEADER_LEN = 8
 DNS_HEADER_LEN = 12
 
+SYN = 'syn'
+SYNACK = 'synack'
+ACK = 'ack'
+FIN = 'fin'
 class Firewall:
     def __init__(self, config, iface_int, iface_ext):
         self.iface_int = iface_int
         self.iface_ext = iface_ext
         self.rules = []
-
+        self.logrules = []
+        self.http_flows = {}
+        self.connections = {}
         # add in rules to self.rules
         with open(config['rule'], 'r') as rulesfile:
             lines = [x.strip() for x in rulesfile]
@@ -36,11 +42,15 @@ class Firewall:
             rules = []
             for x in lines:
                 rule = None
-                if x[1] == 'dns':
+                if x[0].lower() == 'log':
+                    logrule = LogRule(x[2])
+                    self.logrules.append(logrule)
+                elif x[1].lower() == 'dns':
                     rule = DNSRule(x[0], x[2])
                 else:
                     rule = ProtocolRule(x[0], x[1], x[2], x[3])
-                rules.append(rule)
+                if rule != None:
+                    rules.append(rule)
         self.rules = rules
 
     
@@ -70,8 +80,20 @@ class Firewall:
         elif verdict == 'pass' and pkt_dir == PKT_DIR_OUTGOING:
             self.iface_ext.send_ip_packet(pkt)
 
+    def pass_packet(self, pkt_dir, pkt):
+        if pkt_dir == PKT_DIR_INCOMING:
+            self.iface_int.send_ip_packet(pkt)
+        else:
+            self.iface_ext.send_ip_packet(pkt)
+
     def handle_p4_packet(self, pkt_dir, pkt):
-        # TODO: reverse rules so first matching applies
+        # handle if log rule matches
+        if is_http(pkt_dir, pkt):
+            pass_pkt = self.assemble_http(pkt_dir, pkt) 
+            if pass_pkt:
+                self.pass_packet(pkt_dir, pkt)
+
+        # handle TCP and DNS 
         rule = get_matching_p4_rule(pkt_dir, pkt, reversed(self.rules), self.geos)
         if rule == None:
             return False
@@ -91,11 +113,118 @@ class Firewall:
         return False
 
     # TODO: You can add more methods as you want.
+    def write_to_log(self, conn, pktKey):
+        hname  = re.search('Host:\s+(?P<hostname>\S+)', conn.request)
+        hostname = ''
+        # regex get hostname
+        if hname:
+            hostname = hname.group('hostname')
+            if type(hostname) == tuple:
+                hostname = hostname[0]
+        # split the connections request data
+        requestData = conn.request.split()
+        method = requestData[0]
+        path = requestData[1]
+        version = requestData[2]
+        status_code = conn.response.split()[1]
+
+        # get size with regex
+        sizeRegex = 'Content-Length:\s+(?P<objsize>\w+)'
+        osizeMatch = re.search(sizeRegex, conn.response)
+        osize = -1
+        if osizeMatch:
+            osize = osizeMatch.group('objsize')
+            if type(osize) == tuple:
+                osize = osize[0]
+        o = [str(hostname), str(method), str(path), str(version), str(status_code), str(osize)]
+        output_line = " ".join(o) + '\n'
+
+        # log if matches rules
+        for rule in self.logrules:
+            if domain_match(rule.hostname, hostname):
+                logfile = open('http.log', 'a')
+                logfile.write(output_line)
+                logfile.flush()
+                break
+        conn.request = ''
+        conn.response = ''
+        conn.flag = FIN
+        self.connections[pktKey] = conn
+
+    def assemble_http(self, pkt_dir, pkt):
+        ip_hdrlen = get_ip_header_length(pkt)
+
+        # split packet into tcp and http segments
+        tcp_pkt = pkt[ip_hdrlen:]
+        tcp_hdrlen = get_tcp_hdrlen(pkt)
+        http_pkt = tcp_pkt[tcp_hdrlen:]
+
+        # get seqno and ackno
+        seqno = int(struct.unpack('!L', tcp_pkt[4:8])[0])
+        ackno = int(struct.unpack('!L', tcp_pkt[8:12])[0])
+        iport = get_tcp_internal_port(pkt_dir, pkt)
+        ip_addr = get_external_ip(pkt_dir, pkt)
+        pktKey = (iport, ip_addr)
+
+        if pktKey in self.connections.keys():
+            # get connection
+            conn = self.connections[pktKey]
+            if conn.flag  == SYN:
+                if pkt_dir == PKT_DIR_INCOMING and ackno == conn.seqno + 1:
+                    conn.seqno = conn.seqno + 1
+                    conn.flag = SYNACK
+                    self.connections[pktKey] = conn
+                    return True
+                else:
+                    return False
+            elif conn.flag == SYNACK:
+                if pkt_dir == PKT_DIR_OUTGOING and seqno == conn.seqno:
+                    conn.flag = ACK
+                    self.connections[pktKey] = conn
+            elif pkt_dir == PKT_DIR_OUTGOING and seqno == conn.seqno:
+                if pkt_dir == conn.pkt_dir:
+                    conn.request = conn.request + http_pkt
+                    breakRegex = '\r\n\r\n'
+                    if re.search(breakRegex, conn.request):
+                        conn.pkt_dir = PKT_DIR_INCOMING
+                    conn.seqno = seqno + len(http_pkt)
+                    self.connections[pktKey] = conn
+                return True
+            elif pkt_dir == PKT_DIR_INCOMING and ackno == conn.seqno:
+                if pkt_dir == conn.pkt_dir:
+                    write = False
+                    in_data = conn.response + http_pkt
+                    endRegex = "Host:\s+\S+.*Content-Length:\s+\w+|Content-Length:\s+\w+.*Host:\s+\S+|\r\n\r\n"
+                    if re.search(endRegex, in_data):
+                        # switch direction of packets + write to output file
+                        conn.pkt_dir = PKT_DIR_OUTGOING
+                        write = True
+                    conn.seqno = ackno + len(http_pkt)
+                    conn.response = in_data
+                    self.connections[pktKey] = conn
+                    if write and conn.flag == ACK:
+                        self.write_to_log(conn, pktKey)
+                return True
+            elif (pkt_dir == PKT_DIR_OUTGOING and conn.seqno > seqno) or (pkt_dir == PKT_DIR_INCOMING and conn.seqno > ackno):
+                return True
+            else:
+                return False
+        else:
+            conn = Connection(seqno, pkt_dir, '', '', SYN)
+            self.connections[pktKey] = conn
+            return True
 
 # TODO: You may want to add more classes/functions as well.
 
 """ PROJECT 4
 """
+def is_http(pkt_dir, pkt):
+    if get_protocol(pkt) == TCP_PROTOCOL:
+        incoming_port = get_tcp_external_port(PKT_DIR_INCOMING, pkt)
+        outgoing_port = get_tcp_external_port(PKT_DIR_OUTGOING, pkt)
+        return incoming_port == 80 or outgoing_port == 80
+    return False
+
 def get_matching_p4_rule(pkt_dir, pkt, rules, geos):
     for rule in rules:
         if packet_matches_rule(pkt_dir, pkt, rule, geos) and (rule.verdict == 'deny' or rule.verdict == 'log'):
@@ -144,23 +273,35 @@ def firewall_handle_packet(pkt_dir, pkt,rules, geos):
     verdict = 'pass'
     for rule in rules:
         if rule.verdict != 'deny' and packet_matches_rule(pkt_dir, pkt, rule, geos):
-            # print rule
             verdict = rule.verdict
     return verdict
 
 def domain_match(rule_domain, pkt_domain):
-    if rule_domain[0] == '*':
-        rd = rule_domain[2:]
-        pd = pkt_domain
-        while len(pd) > 0 and pd[0] != '.':
-            pd = pd[1:]
-        pd = pd[1:]
-        if pd == rd:
+    rsplit = rule_domain.split('.')[::-1]
+    psplit = pkt_domain.split('.')[::-1]
+    for i in range(len(psplit)):
+        p = psplit[i]
+        r = rsplit[i]
+        if r == '*':
+            print pkt_domain + ' matches '+rule_domain
             return True
-    else:
-        if rule_domain == pkt_domain:
-            return True
-    return False
+        if r != p:
+            return False
+    print pkt_domain + ' matches '+rule_domain
+    return True
+        
+    # if rule_domain[0] == '*':
+        # rd = rule_domain[2:]
+        # pd = pkt_domain
+        # while len(pd) > 0 and pd[0] != '.':
+            # pd = pd[1:]
+        # pd = pd[1:]
+        # if pd == rd:
+            # return True
+    # else:
+        # if rule_domain == pkt_domain:
+            # return True
+    # return False
 
 """
 methods
@@ -173,6 +314,11 @@ def get_ip_header_length(pkt):
     ihl =  ihl&0xF
     return ihl * 4
 
+def get_tcp_hdrlen(pkt):
+    ip_hdrlen = get_ip_header_length(pkt)
+    tcp = pkt[ip_hdrlen:]
+    leng = ((struct.unpack('!B', tcp[12])[0] & 0xF0)>>4)*4
+    return leng
 def get_protocol(pkt):
     protocol = struct.unpack('!B', pkt[9:10])[0]
     return protocol
@@ -192,6 +338,15 @@ def get_tcp_external_port(pkt_dir, pkt):
         # use destination
         ext_port = struct.unpack('!H', pkt[pkt_ip_hdrlen+2:pkt_ip_hdrlen+2+2])[0]
     if pkt_dir == PKT_DIR_INCOMING:
+        # use source
+        ext_port = struct.unpack('!H', pkt[pkt_ip_hdrlen+0:pkt_ip_hdrlen+0+2])[0]
+    return ext_port
+def get_tcp_internal_port(pkt_dir, pkt):
+    pkt_ip_hdrlen = get_ip_header_length(pkt)
+    if pkt_dir == PKT_DIR_INCOMING:
+        # use destination
+        ext_port = struct.unpack('!H', pkt[pkt_ip_hdrlen+2:pkt_ip_hdrlen+2+2])[0]
+    if pkt_dir == PKT_DIR_OUTGOING:
         # use source
         ext_port = struct.unpack('!H', pkt[pkt_ip_hdrlen+0:pkt_ip_hdrlen+0+2])[0]
     return ext_port
@@ -223,12 +378,10 @@ def dns_qname(pkt):
     numbytes = struct.unpack('!B', pkt[start:start+1])[0]
     qname = ''
     while not finished:
-        # print 'numbytes:'+str(numbytes)
         while numbytes > 0:
             numbytes -= 1
             start = start+1
             qname += chr(struct.unpack('!B', pkt[start:start+1])[0])
-            # print qname
         start += 1
         numbytes = struct.unpack('!B', pkt[start:start+1])[0]
         if numbytes == 0:
@@ -243,12 +396,10 @@ def dns_qname_qtype_qclass(pkt):
     numbytes = struct.unpack('!B', pkt[start:start+1])[0]
     qname = ''
     while not finished:
-        # print 'numbytes:'+str(numbytes)
         while numbytes > 0:
             numbytes -= 1
             start = start+1
             qname += chr(struct.unpack('!B', pkt[start:start+1])[0])
-            # print qname
         start += 1
         numbytes = struct.unpack('!B', pkt[start:start+1])[0]
         if numbytes == 0:
@@ -387,7 +538,18 @@ class DNSRule(Rule):
         return self.verdict
 
 # project 4 stuff
+class LogRule:
+    def __init__(self, hn):
+        self.hostname = hn
 
+### keep track of http flows
+class Connection:
+    def __init__(self, seq, pd, i, o, est):
+        self.seqno = seq
+        self.pkt_dir = pd
+        self.request = i
+        self.response = o
+        self.flag = est
 
 def get_checksum(data):
   size = len(data)
