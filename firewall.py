@@ -26,6 +26,14 @@ SYN = 'syn'
 SYNACK = 'synack'
 ACK = 'ack'
 FIN = 'fin'
+
+def get_method(resp):
+    methods = ['GET', 'POST', 'PUT', 'DELETE', 'UPDATE']
+    for method in methods:
+        if method in resp:
+            return method
+    return 'NONE'
+
 class Firewall:
     def __init__(self, config, iface_int, iface_ext):
         self.iface_int = iface_int
@@ -33,6 +41,7 @@ class Firewall:
         self.rules = []
         self.logrules = []
         self.connections = {}
+        self.assemblies = {}
         # add in rules to self.rules
         with open(config['rule'], 'r') as rulesfile:
             lines = [x.strip() for x in rulesfile]
@@ -88,10 +97,9 @@ class Firewall:
     def handle_p4_packet(self, pkt_dir, pkt):
         # handle if log rule matches
         if is_http(pkt_dir, pkt):
-            pass_pkt = self.assemble_http(pkt_dir, pkt) 
+            pass_pkt = self.ass_pkt(pkt_dir, pkt) 
             if pass_pkt:
                 self.pass_packet(pkt_dir, pkt)
-
         # handle TCP and DNS 
         rule = get_matching_p4_rule(pkt_dir, pkt, reversed(self.rules), self.geos)
         if rule == None:
@@ -110,52 +118,9 @@ class Firewall:
         else:
             print 'matches some OTHER RULE probably LOG'
         return False
-
-    # TODO: You can add more methods as you want.
-    def write_to_log(self, conn, pktKey):
-        hname  = re.search('Host:\s+(?P<hostname>\S+)', conn.request)
-        hostname = ''
-        # regex get hostname
-        if hname:
-            hostname = hname.group('hostname')
-            if type(hostname) == tuple:
-                hostname = hostname[0]
-        if hostname == '':
-            hostname = str(pktKey[1])
-        # split the connections request data
-        requestData = conn.request.split()
-        method = requestData[0]
-        path = requestData[1]
-        version = requestData[2]
-        status_code = conn.response.split()[1]
-
-        # get size with regex
-        sizeRegex = 'Content-Length:\s+(?P<objsize>\w+)'
-        osizeMatch = re.search(sizeRegex, conn.response)
-        osize = -1
-        if osizeMatch:
-            osize = osizeMatch.group('objsize')
-            if type(osize) == tuple:
-                osize = osize[0]
-        o = [str(hostname), str(method), str(path), str(version), str(status_code), str(osize)]
-        output_line = " ".join(o) + '\n'
-
-        # log if matches rules
-        for rule in self.logrules:
-            if domain_match(rule.hostname, hostname):
-                logfile = open('http.log', 'a')
-                logfile.write(output_line)
-                logfile.flush()
-                break
-        conn.request = ''
-        conn.response = ''
-        conn.flag = FIN
-        self.connections[pktKey] = conn
-
-    def assemble_http(self, pkt_dir, pkt):
+    
+    def ass_pkt(self, pkt_dir, pkt):
         ip_hdrlen = get_ip_header_length(pkt)
-
-        # split packet into tcp and http segments
         tcp_pkt = pkt[ip_hdrlen:]
         tcp_hdrlen = get_tcp_hdrlen(pkt)
         http_pkt = tcp_pkt[tcp_hdrlen:]
@@ -165,64 +130,83 @@ class Firewall:
         ackno = int(struct.unpack('!L', tcp_pkt[8:12])[0])
         iport = get_tcp_internal_port(pkt_dir, pkt)
         ip_addr = get_external_ip(pkt_dir, pkt)
-        pktKey = (iport, ip_addr)
+        key = (iport, ip_addr, pkt_dir)
 
-        if pktKey in self.connections.keys():
-            # get connection
-            conn = self.connections[pktKey]
-            if conn.flag  == SYN:
-                if pkt_dir == PKT_DIR_INCOMING and ackno == conn.seqno + 1:
-                    conn.seqno = conn.seqno + 1
-                    conn.flag = SYNACK
-                    self.connections[pktKey] = conn
-                    return True
-                else:
-                    return False
-            elif conn.flag == SYNACK:
-                if pkt_dir == PKT_DIR_OUTGOING and seqno == conn.seqno:
-                    conn.flag = ACK
-                    self.connections[pktKey] = conn
-            elif pkt_dir == PKT_DIR_OUTGOING and seqno == conn.seqno:
-                if pkt_dir == conn.pkt_dir:
-                    conn.request = conn.request + http_pkt
-                    breakRegex = '\r\n\r\n'
-                    if re.search(breakRegex, conn.request):
-                        conn.pkt_dir = PKT_DIR_INCOMING
-                    conn.seqno = seqno + len(http_pkt)
-                    self.connections[pktKey] = conn
-                return True
-            elif pkt_dir == PKT_DIR_INCOMING and ackno == conn.seqno:
-                if pkt_dir == conn.pkt_dir:
-                    write = False
-                    in_data = conn.response + http_pkt
-                    endRegex = "Host:\s+\S+.*Content-Length:\s+\w+|Content-Length:\s+\w+.*Host:\s+\S+|\r\n\r\n"
-                    if re.search(endRegex, in_data):
-                        # switch direction of packets + write to output file
-                        conn.pkt_dir = PKT_DIR_OUTGOING
-                        write = True
-                    conn.seqno = ackno + len(http_pkt)
-                    conn.response = in_data
-                    self.connections[pktKey] = conn
-                    if write and conn.flag == ACK:
-                        self.write_to_log(conn, pktKey)
-                return True
-            elif (pkt_dir == PKT_DIR_OUTGOING and conn.seqno > seqno) or (pkt_dir == PKT_DIR_INCOMING and conn.seqno > ackno):
-                return True
-            else:
-                return False
+        if key in self.assemblies.keys():
+            data = self.assemblies[key]
+            eseqno = data[0]
+            if eseqno == seqno:
+                http_data = data[2] + http_pkt
+                self.assemblies[key] = (seqno + len(http_pkt), ackno, http_data)
+            elif seqno < eseqno:
+                # else just drop the packet
+                self.pass_packet(pkt_dir, pkt)
+            # check if request and response headers are complete
+            ikey = (key[0], key[1], PKT_DIR_INCOMING)
+            if key[2] == PKT_DIR_INCOMING:
+                ikey = (key[0], key[1], PKT_DIR_OUTGOING)
+            if ikey in self.assemblies.keys():
+                http2 = self.assemblies[ikey][2]
+                http1 = self.assemblies[key][2]
+                if '\r\n\r\n' in http1 and '\r\n\r\n' in http2:
+                    try:
+                        if pkt_dir == PKT_DIR_OUTGOING:
+                            resp = http1 + http2
+                            resp2 = http2 + http1
+                        else:
+                            resp = http2 + http1
+                            resp2 = http1 + http2
+                        # print 'first line of resp'
+                        fline =  resp.split('\n')[0]
+                        clength = '-1'
+                        if 'Content-Length' in resp:
+                            clength = resp.split('Content-Length: ')[1].split('\n')[0]
+                        if 'Host: ' in resp:
+                            hname = resp.split('Host: ')[1].split('\n')[0].strip()
+                        else:
+                            hname = 'some ip'
+                        stuff = fline.split(' ')
+                        path = '/'
+                        if len(stuff) > 1:
+                            path = stuff[1]
+                        method = stuff[0]
+                        version = 'version'
+                        hsplit = resp2.split('\n')[0].split(' ')
+                        status_code = hsplit[1]
+                        version  = hsplit[0]
+                        logentry =  hname.strip() + ' ' + method.strip() + ' ' + path.strip() + ' ' + version.strip() + ' ' + status_code.strip() + ' ' + clength.strip() + '\n'
+                        for rule in self.logrules:
+                            if domain_match(rule.hostname, hname):
+                                # log it also
+                                f = open('http.log', 'a')
+                                f.write(logentry)
+                                print logentry
+                                f.flush()
+                                break
+                    except:
+                        print 'some error occurrred'
+                    # remove it from assemblies dict
+                    del self.assemblies[key]
+                    del self.assemblies[ikey]
+
         else:
-            conn = Connection(seqno, pkt_dir, '', '', SYN)
-            self.connections[pktKey] = conn
-            return True
+            self.assemblies[key] = (seqno+1, ackno, '')
 
 # TODO: You may want to add more classes/functions as well.
 
 """ PROJECT 4
 """
+
+
+def invkey(key):
+    if key[2] == PKT_DIR_INCOMING:
+        return PKT_DIR_OUTGOING
+    return PKT_DIR_INCOMING
+
 def is_http(pkt_dir, pkt):
     if get_protocol(pkt) == TCP_PROTOCOL:
-        incoming_port = get_tcp_external_port(PKT_DIR_INCOMING, pkt)
-        outgoing_port = get_tcp_external_port(PKT_DIR_OUTGOING, pkt)
+        incoming_port = get_tcp_internal_port(pkt_dir, pkt)
+        outgoing_port = get_tcp_external_port(pkt_dir, pkt)
         return incoming_port == 80 or outgoing_port == 80
     return False
 
