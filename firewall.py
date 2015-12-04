@@ -131,6 +131,7 @@ class Firewall:
         iport = get_tcp_internal_port(pkt_dir, pkt)
         ip_addr = get_external_ip(pkt_dir, pkt)
         key = (iport, ip_addr, pkt_dir)
+        passPacket = True
 
         if key in self.assemblies.keys():
             data = self.assemblies[key]
@@ -138,9 +139,8 @@ class Firewall:
             if eseqno == seqno:
                 http_data = data[2] + http_pkt
                 self.assemblies[key] = (seqno + len(http_pkt), ackno, http_data)
-            elif seqno < eseqno:
-                # else just drop the packet
-                self.pass_packet(pkt_dir, pkt)
+            elif seqno > eseqno:
+                passPacket = False
             # check if request and response headers are complete
             ikey = (key[0], key[1], PKT_DIR_INCOMING)
             if key[2] == PKT_DIR_INCOMING:
@@ -191,6 +191,7 @@ class Firewall:
 
         else:
             self.assemblies[key] = (seqno+1, ackno, '')
+        return passPacket
 
 # TODO: You may want to add more classes/functions as well.
 
