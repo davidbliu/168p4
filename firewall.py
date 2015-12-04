@@ -120,6 +120,8 @@ class Firewall:
             hostname = hname.group('hostname')
             if type(hostname) == tuple:
                 hostname = hostname[0]
+        if hostname == '':
+            hostname = str(pktKey[1])
         # split the connections request data
         requestData = conn.request.split()
         method = requestData[0]
