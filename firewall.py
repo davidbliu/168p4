@@ -180,7 +180,7 @@ class Firewall:
                                 # log it also
                                 f = open('http.log', 'a')
                                 f.write(logentry)
-                                print logentry
+                                # print logentry
                                 f.flush()
                                 break
                     except:
