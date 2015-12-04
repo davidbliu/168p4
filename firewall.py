@@ -32,7 +32,6 @@ class Firewall:
         self.iface_ext = iface_ext
         self.rules = []
         self.logrules = []
-        self.http_flows = {}
         self.connections = {}
         # add in rules to self.rules
         with open(config['rule'], 'r') as rulesfile:
@@ -542,7 +541,6 @@ class LogRule:
     def __init__(self, hn):
         self.hostname = hn
 
-### keep track of http flows
 class Connection:
     def __init__(self, seq, pd, i, o, est):
         self.seqno = seq
